@@ -1,8 +1,0 @@
-{
-  "/_not-found/page": "app/_not-found/page.js",
-  "/pipeline/[id]/page": "app/pipeline/[id]/page.js",
-  "/page": "app/page.js",
-  "/pipeline/[id]/run/[runId]/page": "app/pipeline/[id]/run/[runId]/page.js",
-  "/api/trpc/[trpc]/route": "app/api/trpc/[trpc]/route.js",
-  "/worker/page": "app/worker/page.js"
-}
