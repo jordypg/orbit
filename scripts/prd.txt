@@ -1,0 +1,683 @@
+# Orbit: Lightweight Data Orchestrator - Product Requirements Document
+
+## Overview
+
+Orbit is a minimal yet powerful data orchestration system built with TypeScript (Node.js) that enables developers to create reliable, fault-tolerant data pipelines. It addresses the need for a lightweight alternative to complex orchestration tools like Airflow or Prefect, providing essential features like automatic retries, state persistence, and resumable workflows without the operational overhead.
+
+**Problem it solves:** Teams need to run periodic data integration tasks (API syncs, ETL jobs, data migrations) but don't want the complexity of enterprise orchestration tools. Current solutions are either too simple (cron jobs without state tracking) or too complex (full Kubernetes deployments).
+
+**Target users:** Small engineering teams, data engineers, and backend developers who need reliable data pipelines without infrastructure complexity.
+
+**Value proposition:** Production-ready orchestration with built-in fault tolerance, observable execution, and simple deployment—all in a system you can understand and modify in an afternoon.
+
+---
+
+## Core Features
+
+### 1. **Declarative Pipeline Definition**
+- **What it does:** Developers define pipelines as TypeScript code with sequential or parallel steps
+- **Why it's important:** Code-first approach means version control, type safety, and familiar development workflow
+- **How it works:** 
+  - Use `definePipeline()` helper to declare pipeline metadata
+  - Chain steps using `step()` function with async handlers
+  - Steps receive context object with run metadata and previous step results
+
+### 2. **Persistent State Management**
+- **What it does:** Stores all pipeline executions, step results, and retry attempts in MongoDB
+- **Why it's important:** Enables observability, debugging, and resume-from-failure capabilities
+- **How it works:**
+  - Three collections: `pipelines`, `runs`, `steps`
+  - Tracks status transitions (pending → running → success/failed)
+  - Stores execution metadata, timestamps, error messages, and result payloads
+
+### 3. **Automatic Retry Logic**
+- **What it does:** Retries failed steps up to 3 times with exponential backoff
+- **Why it's important:** Handles transient failures (network issues, rate limits) without manual intervention
+- **How it works:**
+  - Increment `attempt_count` on failure
+  - Calculate backoff: `Math.min(30 * 2^attempt, 300)` seconds
+  - Mark step as `retrying` and schedule re-execution
+  - After max attempts, mark as `failed` and halt pipeline
+
+### 4. **Resume Interrupted Runs**
+- **What it does:** Picks up pipeline execution from the last successful step after crashes or restarts
+- **Why it's important:** Prevents data loss and duplicate work in long-running pipelines
+- **How it works:**
+  - Query `steps` collection for last completed step in run
+  - Skip already-successful steps
+  - Re-execute from first non-completed step with preserved context
+
+### 5. **CLI Management Interface**
+- **What it does:** Command-line tool for triggering pipelines and inspecting execution history
+- **Why it's important:** Enables automation, scripting, and quick debugging
+- **How it works:**
+  - `orbit run <name>` - Execute pipeline immediately
+  - `orbit status <name>` - Show recent run history
+  - `orbit logs <name> [runId]` - Display step-by-step execution logs
+  - `orbit list` - Enumerate all registered pipelines
+
+### 6. **Web Dashboard**
+- **What it does:** Visual interface showing pipeline health, execution history, and detailed logs
+- **Why it's important:** Non-technical stakeholders can monitor data pipelines without CLI access
+- **How it works:**
+  - Next.js app with tRPC API layer
+  - Dashboard view: Grid of pipeline cards with success rates and last run status
+  - Detail view: Timeline of steps with durations, status badges, and error messages
+  - Manual retry button for failed runs
+
+---
+
+## User Experience
+
+### User Personas
+
+**1. Backend Developer (Primary)**
+- Needs to sync data between systems
+- Comfortable with TypeScript and database queries
+- Values simplicity over enterprise features
+- Runs pipelines locally or on single server
+
+**2. Data Engineer (Secondary)**
+- Manages multiple data integration workflows
+- Needs visibility into pipeline health
+- Occasionally debugs failures
+- Uses both CLI and web UI
+
+### Key User Flows
+
+**Flow 1: Creating a New Pipeline**
+1. Create new file in `src/pipelines/`
+2. Define pipeline with `definePipeline()`
+3. Write async step functions
+4. Export pipeline from index
+5. Test with `orbit run <name>`
+
+**Flow 2: Monitoring Pipeline Execution**
+1. Open web dashboard
+2. View pipeline cards with status indicators
+3. Click pipeline to see run history
+4. Click specific run to see step timeline
+5. Inspect error messages for failed steps
+
+**Flow 3: Debugging a Failed Pipeline**
+1. Receive notification of failed run
+2. Run `orbit logs github-metrics 42` in terminal
+3. Identify failing step and error message
+4. Fix code or external issue
+5. Retry manually via CLI or web UI
+6. Verify success
+
+### UI/UX Considerations
+
+**Dashboard Design:**
+- Use shadcn/ui components for consistency
+- Status indicators with color coding (green/yellow/red)
+- Relative timestamps ("2 minutes ago")
+- Searchable/filterable pipeline list
+
+**Detail View:**
+- Vertical timeline showing step execution flow
+- Collapsible error stack traces
+- JSON viewer for step results
+- Copy button for run IDs and error messages
+
+**Responsiveness:**
+- Mobile-friendly dashboard for quick status checks
+- Desktop-optimized detail views with side-by-side comparisons
+
+---
+
+## Technical Architecture
+
+### System Components
+
+**1. Core Executor (`src/core/executor.ts`)**
+- Pipeline runner with retry orchestration
+- Manages step execution lifecycle
+- Handles context passing between steps
+- Implements exponential backoff algorithm
+
+**2. Storage Layer (`src/core/storage.ts`)**
+- MongoDB client wrapper
+- CRUD operations for pipelines, runs, steps
+- Transaction support for atomic updates
+- Query helpers for filtering and aggregation
+
+**3. Scheduler (`src/core/scheduler.ts`)**
+- Optional cron-based pipeline triggering
+- Uses `node-cron` for schedule parsing
+- Stores schedule metadata in `pipelines` collection
+- Logs scheduled executions
+
+**4. Logger (`src/core/logger.ts`)**
+- Dual output: console + database
+- Structured logging with Winston
+- Correlates logs with run IDs
+- Supports log levels (debug, info, warn, error)
+
+**5. tRPC API (`src/server/routers/`)**
+- `pipeline.router.ts` - List, get, create pipelines
+- `run.router.ts` - Get runs, retry failed runs
+- `step.router.ts` - Get step details and logs
+
+**6. CLI (`src/cli.ts`)**
+- Commander.js-based CLI interface
+- Connects to same MongoDB instance as server
+- Pretty-prints tables with `cli-table3`
+- Color-coded output with `chalk`
+
+**7. Web UI (`src/ui/`)**
+- Next.js 14 with App Router
+- shadcn/ui component library
+- tRPC client for type-safe API calls
+- Tailwind CSS for styling
+
+### Data Models
+
+**Pipelines Collection:**
+```typescript
+{
+  _id: ObjectId,
+  name: string,
+  description: string,
+  schedule?: string, // cron expression
+  createdAt: Date
+}
+```
+
+**Runs Collection:**
+```typescript
+{
+  _id: ObjectId,
+  pipelineId: ObjectId,
+  startedAt: Date,
+  finishedAt?: Date,
+  status: 'running' | 'success' | 'failed',
+  triggeredBy: 'manual' | 'schedule' | 'api'
+}
+```
+
+**Steps Collection:**
+```typescript
+{
+  _id: ObjectId,
+  runId: ObjectId,
+  name: string,
+  startedAt?: Date,
+  finishedAt?: Date,
+  status: 'pending' | 'success' | 'failed' | 'retrying',
+  attemptCount: number,
+  error?: string,
+  result?: any, // EJSON-serializable
+  nextRetryAt?: Date
+}
+```
+
+### APIs and Integrations
+
+**tRPC Routes:**
+- `pipeline.list()` - Get all pipelines with last run status
+- `pipeline.get(id)` - Get single pipeline with recent runs
+- `run.getByPipeline(pipelineId)` - Paginated run history
+- `run.get(id)` - Single run with all steps
+- `run.retry(id)` - Re-execute failed run
+- `step.getLogs(runId)` - Chronological step execution log
+
+**External Dependencies:**
+- MongoDB for persistence
+- (Optional) Redis for distributed locking
+- (Optional) Slack/Discord webhooks for notifications
+
+### Infrastructure Requirements
+
+**Minimum:**
+- Node.js 18+
+- MongoDB 5.0+
+- 512MB RAM
+- Single-server deployment
+
+**Production:**
+- MongoDB Atlas (M10+ cluster)
+- Vercel/Railway for web UI
+- Background worker process for scheduler
+- Environment-based configuration
+
+---
+
+## Development Roadmap
+
+### Phase 1: Core Engine (MVP Foundation)
+
+**Scope:** Build the minimal orchestration engine that can execute pipelines and persist state.
+
+**Deliverables:**
+1. **MongoDB Schema Setup**
+   - Define Mongoose schemas for `pipelines`, `runs`, `steps`
+   - Create indexes on `pipelineId`, `status`, `startedAt`
+   - Seed script for test data
+
+2. **Pipeline Definition API**
+   - `definePipeline()` helper function
+   - `step()` wrapper for step functions
+   - TypeScript types for `StepContext`, `StepResult`
+   - Pipeline registry singleton
+
+3. **Basic Executor**
+   - Sequential step execution
+   - Try-catch error handling per step
+   - Database persistence of run state
+   - No retries yet (fail fast)
+
+4. **Simple CLI**
+   - `orbit run <name>` command
+   - Load pipelines from `src/pipelines/` directory
+   - Console logging of execution
+
+**Success Criteria:**
+- Can run a 3-step pipeline end-to-end
+- State persisted correctly in MongoDB
+- Errors logged to console and database
+
+---
+
+### Phase 2: Fault Tolerance
+
+**Scope:** Add retry logic and resume capabilities to make pipelines production-ready.
+
+**Deliverables:**
+1. **Retry Mechanism**
+   - Exponential backoff calculation
+   - `attemptCount` tracking in steps
+   - `nextRetryAt` timestamp field
+   - Retry loop in executor
+
+2. **Resume Logic**
+   - Query for incomplete runs on startup
+   - Skip already-completed steps
+   - Reconstruct context from previous step results
+
+3. **Enhanced Logging**
+   - Winston integration
+   - Structured logs with `runId`, `stepName`
+   - Log level configuration via env vars
+
+4. **CLI Enhancements**
+   - `orbit status <name>` - Show last 10 runs
+   - `orbit logs <name> [runId]` - Pretty-print logs
+   - `orbit list` - Table of all pipelines
+
+**Success Criteria:**
+- Failed steps automatically retry 3 times
+- Crashed pipelines resume from last success
+- Logs queryable via CLI
+
+---
+
+### Phase 3: Web Dashboard (First UI Touchpoint)
+
+**Scope:** Create minimal but functional web interface for visibility.
+
+**Deliverables:**
+1. **tRPC API Setup**
+   - Initialize tRPC in Next.js app
+   - Create `pipeline`, `run`, `step` routers
+   - MongoDB connection in API context
+
+2. **Dashboard Page**
+   - Grid layout with shadcn Card components
+   - Pipeline cards showing:
+     - Name and description
+     - Last run status (Badge)
+     - Success rate (last 30 days)
+     - "Run Now" button
+   - Use lucide-react icons for status
+
+3. **Run Detail Page**
+   - URL: `/pipeline/[id]/run/[runId]`
+   - Vertical timeline of steps (shadcn Separator)
+   - Status badges (success/failed/retrying)
+   - Expandable error messages (shadcn Collapsible)
+   - Duration display
+
+4. **Manual Retry Button**
+   - Server action via tRPC mutation
+   - Optimistic UI update
+   - Toast notification on success/failure
+
+**Success Criteria:**
+- Dashboard loads pipeline list from database
+- Can view execution history and logs in browser
+- Manual retry works from UI
+
+---
+
+### Phase 4: Example Pipelines
+
+**Scope:** Implement two real-world pipelines demonstrating different use cases.
+
+**Deliverables:**
+1. **GitHub Metrics Pipeline**
+   - Step 1: Fetch repo stats from GitHub API
+   - Step 2: Transform JSON to flat schema
+   - Step 3: Upsert to MongoDB collection
+   - Step 4: Send Slack notification
+   - Demonstrates: External API integration, retries on rate limits
+
+2. **CSV to API Sync Pipeline**
+   - Step 1: Read CSV from `./data/users.csv`
+   - Step 2: POST batches to mock REST API
+   - Step 3: Update Redis cache with synced IDs
+   - Step 4: Verify count matches
+   - Demonstrates: File I/O, batch processing, integrity checks
+
+3. **Pipeline Templates**
+   - Shared utilities in `src/pipelines/utils/`
+   - HTTP client with built-in retries
+   - CSV parser helper
+   - Database upsert helper
+
+**Success Criteria:**
+- Both pipelines run successfully end-to-end
+- Retries work on simulated failures
+- Dashboard shows execution history for both
+
+---
+
+### Phase 5: Scheduler & Automation
+
+**Scope:** Enable periodic pipeline execution without manual triggering.
+
+**Deliverables:**
+1. **Cron Scheduler Service**
+   - Background process using `node-cron`
+   - Load pipelines with `schedule` field
+   - Execute at specified intervals
+   - Log scheduled runs
+
+2. **Schedule Management UI**
+   - Add/edit schedule in pipeline settings
+   - Cron expression builder component
+   - Next run time display
+
+3. **Execution History Pagination**
+   - Infinite scroll on run list
+   - Filter by status, date range
+   - Export logs as JSON
+
+**Success Criteria:**
+- Pipelines execute on schedule without manual trigger
+- Can disable/enable schedules from UI
+- History remains performant with 1000+ runs
+
+---
+
+### Phase 6: Polish & Production Readiness
+
+**Scope:** Improve observability, performance, and deployment.
+
+**Deliverables:**
+1. **Performance Optimizations**
+   - Index tuning for common queries
+   - Connection pooling for MongoDB
+   - Step result compression for large payloads
+
+2. **Alerting & Notifications**
+   - Webhook integration (Slack, Discord, email)
+   - Alert rules: consecutive failures, long duration
+   - Notification settings per pipeline
+
+3. **Documentation**
+   - README with quickstart guide
+   - API documentation for step functions
+   - Deployment guide (Docker, Railway, Vercel)
+
+4. **Testing**
+   - Unit tests for executor, retry logic
+   - Integration tests for API routes
+   - E2E tests for critical user flows
+
+**Success Criteria:**
+- System handles 100+ concurrent pipeline executions
+- Deployment guide enables setup in <30 minutes
+- Test coverage >70%
+
+---
+
+## Logical Dependency Chain
+
+### Foundation Layer (Build First)
+1. **MongoDB Schema** - Required for all features
+2. **Pipeline Definition API** - Needed before executor
+3. **Basic Executor** - Core engine for everything else
+
+### Rapid UI Visibility (Get to Working Frontend ASAP)
+4. **Simple tRPC API** - Bridge between backend and UI
+5. **Dashboard Page** - First visible, working interface
+6. **Run Detail Page** - Complete the core viewing experience
+
+**Rationale:** By Phase 3, developers can *see* pipeline executions in a browser, making the product feel real and enabling visual debugging.
+
+### Atomic Feature Additions (Build Upon Foundation)
+7. **Retry Logic** - Enhances executor without breaking existing code
+8. **Resume Logic** - Builds on retry mechanism
+9. **CLI Enhancements** - Independent of UI, can develop in parallel
+10. **Example Pipelines** - Validate all previous features work
+
+### Automation & Polish (Final Layers)
+11. **Scheduler** - Requires stable executor and persistence
+12. **Notifications** - Optional enhancement to scheduler
+13. **Performance & Testing** - Refine what's already built
+
+**Scoping Strategy:**
+- Each phase delivers a **working, testable increment**
+- No phase depends on future phases (linear buildout)
+- UI comes early to maintain momentum and enable demos
+- Polish happens last to avoid premature optimization
+
+---
+
+## Risks and Mitigations
+
+### Technical Challenges
+
+**Risk 1: Concurrent Pipeline Execution**
+- **Challenge:** Multiple instances running same pipeline could corrupt state
+- **Mitigation:** 
+  - Phase 1: Single-process execution only (document limitation)
+  - Phase 6: Add distributed locking with Redis (optional enhancement)
+  - Use MongoDB transactions for atomic run creation
+
+**Risk 2: Large Step Results**
+- **Challenge:** Storing multi-MB JSON payloads in MongoDB steps collection
+- **Mitigation:**
+  - Implement 10MB result size limit
+  - Truncate large results and log warning
+  - Future: Store large results in S3, reference by URL
+
+**Risk 3: Long-Running Pipelines**
+- **Challenge:** Steps that take hours could time out or lose connection
+- **Mitigation:**
+  - Design steps to be idempotent (can safely re-run)
+  - Store checkpoints within long steps
+  - Document maximum recommended step duration (30 minutes)
+
+### MVP Scoping
+
+**Risk 1: Scope Creep**
+- **Challenge:** Temptation to add "just one more feature" delays launch
+- **Mitigation:**
+  - Strictly follow phase definitions
+  - Park nice-to-have ideas in `FUTURE.md`
+  - Ship Phase 3 as initial beta to get feedback
+
+**Risk 2: Over-Engineering**
+- **Challenge:** Building for enterprise scale when targeting small teams
+- **Mitigation:**
+  - No microservices (monolith is fine)
+  - No Kubernetes (single server deployment)
+  - No custom queue system (MongoDB polling is sufficient)
+
+**MVP Definition:**
+- **Must Have:** Phases 1-3 (executor + retry + basic UI)
+- **Should Have:** Phase 4 (example pipelines for validation)
+- **Nice to Have:** Phases 5-6 (scheduler, polish)
+
+### Resource Constraints
+
+**Risk 1: Solo Developer Bandwidth**
+- **Challenge:** One person building entire stack (backend + frontend + infra)
+- **Mitigation:**
+  - Use pre-built UI components (shadcn/ui)
+  - Leverage tRPC for type safety (reduces debugging time)
+  - Deploy on managed services (MongoDB Atlas, Vercel)
+  - Timebox each phase to 1-2 weeks
+
+**Risk 2: MongoDB Atlas Costs**
+- **Challenge:** Free tier may be insufficient for testing large pipelines
+- **Mitigation:**
+  - Use local MongoDB for development
+  - Implement aggressive log pruning (delete runs >90 days)
+  - Document self-hosted MongoDB option
+
+**Risk 3: Maintenance Burden**
+- **Challenge:** Supporting users after launch
+- **Mitigation:**
+  - Write comprehensive docs during development
+  - Include troubleshooting guide in README
+  - Use GitHub Discussions for community support
+  - No SLA commitments for free tier
+
+---
+
+## Appendix
+
+### A. Research Findings
+
+**Competitive Analysis:**
+- **Airflow:** Too complex (K8s, DAG files, web server, scheduler, workers)
+- **Prefect:** Better UX but still requires separate server deployment
+- **Temporal:** Powerful but heavyweight (requires 4+ services)
+- **n8n:** Visual builder is great for non-coders but limiting for developers
+
+**Orbit Differentiation:**
+- Code-first (not visual builder)
+- Single-process deployment
+- <500 LOC core engine
+- MongoDB-only persistence (no separate queue)
+
+### B. Technical Specifications
+
+**Retry Algorithm:**
+```typescript
+function calculateBackoff(attemptCount: number): number {
+  const baseDelay = 30; // seconds
+  const maxDelay = 300; // 5 minutes
+  return Math.min(baseDelay * Math.pow(2, attemptCount), maxDelay);
+}
+```
+
+**Step Context Schema:**
+```typescript
+interface StepContext {
+  runId: string;
+  pipelineId: string;
+  prevResults: Record<string, StepResult>; // keyed by step name
+  metadata: {
+    triggeredBy: 'manual' | 'schedule' | 'api';
+    startedAt: Date;
+  };
+}
+```
+
+**Environment Variables:**
+```bash
+MONGODB_URI=mongodb://localhost:27017/orbit
+LOG_LEVEL=info
+MAX_RETRIES=3
+RETRY_BASE_DELAY=30
+SLACK_WEBHOOK_URL=https://hooks.slack.com/...
+```
+
+### C. Database Indexes
+
+```javascript
+// pipelines collection
+db.pipelines.createIndex({ name: 1 }, { unique: true });
+
+// runs collection
+db.runs.createIndex({ pipelineId: 1, startedAt: -1 });
+db.runs.createIndex({ status: 1, startedAt: -1 });
+
+// steps collection
+db.steps.createIndex({ runId: 1, name: 1 });
+db.steps.createIndex({ status: 1, nextRetryAt: 1 });
+```
+
+### D. Example Pipeline Code
+
+```typescript
+import { definePipeline, step } from '@/core/pipeline';
+import { Octokit } from '@octokit/rest';
+
+export const githubMetrics = definePipeline({
+  name: 'github-metrics',
+  description: 'Sync GitHub repo metrics to database',
+  steps: [
+    step('fetch', async (ctx) => {
+      const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+      const { data } = await octokit.repos.get({
+        owner: 'acme',
+        repo: 'web-app',
+      });
+      return {
+        success: true,
+        data: {
+          stars: data.stargazers_count,
+          forks: data.forks_count,
+          issues: data.open_issues_count,
+        },
+      };
+    }),
+    
+    step('load', async (ctx) => {
+      const metrics = ctx.prevResults.fetch.data;
+      await db.collection('github_metrics').updateOne(
+        { repo: 'acme/web-app' },
+        { $set: { ...metrics, updatedAt: new Date() } },
+        { upsert: true }
+      );
+      return { success: true };
+    }),
+  ],
+});
+```
+
+### E. UI Component Specifications
+
+**Pipeline Card Component:**
+- Uses shadcn `Card`, `Badge`, `Button`
+- Props: `pipeline`, `lastRun`, `successRate`
+- Displays: Name, description, status badge, last run time, success %
+- Actions: "Run Now" button, "View Details" link
+
+**Step Timeline Component:**
+- Uses shadcn `Separator` for vertical line
+- Props: `steps[]`
+- Each step shows: Name, status icon, duration, error (if failed)
+- Collapsible error stack trace with `Collapsible` component
+
+**Run Status Badge:**
+```typescript
+const statusConfig = {
+  success: { label: 'Success', variant: 'default', icon: CheckCircle2 },
+  failed: { label: 'Failed', variant: 'destructive', icon: XCircle },
+  running: { label: 'Running', variant: 'secondary', icon: Loader2 },
+  retrying: { label: 'Retrying', variant: 'warning', icon: RotateCw },
+};
+```
+
+---
+
+**Document Version:** 1.0  
+**Last Updated:** October 10, 2025  
+**Status:** Draft for Implementation

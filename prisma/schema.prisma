@@ -1,0 +1,63 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Pipeline {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  schedule    String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  runs        Run[]
+
+  @@map("pipelines")
+}
+
+model Run {
+  id          String    @id @default(cuid())
+  pipelineId  String
+  startedAt   DateTime  @default(now())
+  finishedAt  DateTime?
+  status      String    @default("pending") // pending, running, success, failed
+  triggeredBy String?
+
+  pipeline    Pipeline  @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  steps       Step[]
+
+  @@index([pipelineId, startedAt])
+  @@index([status, startedAt])
+  @@map("runs")
+}
+
+model Step {
+  id           String    @id @default(cuid())
+  runId        String
+  name         String
+  startedAt    DateTime?
+  finishedAt   DateTime?
+  status       String    @default("pending") // pending, running, success, failed, retrying
+  attemptCount Int       @default(0)
+  error        String?   @db.Text
+  result       String?   @db.Text
+  nextRetryAt  DateTime?
+
+  run          Run       @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, name])
+  @@index([status, nextRetryAt])
+  @@map("steps")
+}

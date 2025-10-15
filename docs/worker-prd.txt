@@ -1,0 +1,607 @@
+# Background Worker Process - Product Requirements Document
+
+## Overview
+
+The Background Worker is a separate Node.js process that continuously polls the database for pending pipeline runs and executes them using the existing `PipelineExecutor` infrastructure. It operates independently from the Next.js web server, enabling distributed and resilient pipeline execution with process management via PM2.
+
+**Problem it solves:** Currently, pipeline runs created via the UI are stored in the database but never executed. There's no system to pick up pending runs and process them.
+
+**Target users:** Developers and operators running Orbit in production environments where pipelines need to execute automatically without manual CLI invocation.
+
+**Value proposition:** Decoupled, resilient pipeline execution with automatic restarts, monitoring, and horizontal scaling capabilities through PM2.
+
+---
+
+## Core Features
+
+### 1. **Continuous Run Polling**
+- **What it does:** Queries database every 5 seconds for runs with `status: 'pending'`
+- **Why it's important:** Enables UI-triggered pipelines to execute automatically
+- **How it works:**
+  - SELECT FOR UPDATE SKIP LOCKED prevents race conditions
+  - Claims run by updating status to 'running'
+  - Executes pipeline using PipelineExecutor
+  - Updates final status (success/failed)
+
+### 2. **Pipeline Registry Initialization**
+- **What it does:** Loads all pipeline definitions from `src/pipelines/` on worker startup
+- **Why it's important:** Worker needs access to pipeline code to execute runs
+- **How it works:**
+  - Reuse existing `PipelineLoader` from CLI
+  - Register all pipelines in singleton registry
+  - Log count of loaded pipelines
+  - Exit if no pipelines found
+
+### 3. **Graceful Shutdown**
+- **What it does:** Handles SIGTERM/SIGINT signals to finish in-flight runs
+- **Why it's important:** Prevents data corruption when stopping worker
+- **How it works:**
+  - Stop polling on shutdown signal
+  - Wait for current execution to complete (with 30s timeout)
+  - Close database connections
+  - Exit with status code 0
+
+### 4. **PM2 Process Management**
+- **What it does:** Run worker as PM2-managed process with automatic restarts
+- **Why it's important:** Production reliability and monitoring
+- **How it works:**
+  - PM2 ecosystem file defines worker config
+  - Auto-restart on crashes
+  - Log rotation built-in
+  - Cluster mode for multiple workers
+
+### 5. **Health Monitoring**
+- **What it does:** Logs worker heartbeat and execution metrics
+- **Why it's important:** Operational visibility into worker health
+- **How it works:**
+  - Log "Worker polling..." every cycle
+  - Track runs executed count
+  - Report errors with context
+  - Expose /health endpoint (future enhancement)
+
+---
+
+## Technical Architecture
+
+### System Components
+
+**1. Worker Entry Point (`src/worker.ts`)**
+- Main process loop
+- Database polling logic
+- Pipeline execution orchestration
+- Signal handlers for graceful shutdown
+
+**2. Run Claimer (`src/core/run-claimer.ts`)**
+- Atomic run acquisition using database transactions
+- Implements SELECT FOR UPDATE SKIP LOCKED
+- Returns claimed run or null
+
+**3. PM2 Configuration (`ecosystem.config.js`)**
+- Worker process definition
+- Environment variables
+- Log paths and rotation
+- Restart policies
+
+**4. Shared Infrastructure**
+- Reuses `PipelineLoader` from CLI
+- Reuses `PipelineExecutor` from core
+- Reuses Prisma client for database
+- Reuses `registry` singleton
+
+### Process Flow
+
+```
+┌─────────────────────────────────────────────┐
+│  PM2 Process Manager                        │
+│  ┌─────────────────────────────────────┐   │
+│  │  Worker Process (src/worker.ts)     │   │
+│  │                                      │   │
+│  │  1. Load pipelines on startup       │   │
+│  │  2. Poll database every 5s          │   │
+│  │  3. Claim pending run (atomic)      │   │
+│  │  4. Get pipeline from registry      │   │
+│  │  5. Execute with PipelineExecutor   │   │
+│  │  6. Update run status               │   │
+│  │  7. Repeat                          │   │
+│  └─────────────────────────────────────┘   │
+└─────────────────────────────────────────────┘
+         │                          │
+         ▼                          ▼
+  ┌──────────────┐          ┌──────────────┐
+  │  PostgreSQL  │          │  Pipelines   │
+  │  (Database)  │          │  (Registry)  │
+  └──────────────┘          └──────────────┘
+```
+
+### Data Flow
+
+**Run Acquisition (Atomic Transaction):**
+```sql
+BEGIN;
+  SELECT * FROM runs
+  WHERE status = 'pending'
+  ORDER BY "createdAt" ASC
+  LIMIT 1
+  FOR UPDATE SKIP LOCKED;
+
+  UPDATE runs
+  SET status = 'running', "startedAt" = NOW()
+  WHERE id = <claimed_run_id>;
+COMMIT;
+```
+
+**Pipeline Execution:**
+```typescript
+const run = await claimPendingRun();
+if (!run) {
+  await sleep(5000);
+  continue;
+}
+
+const pipeline = registry.getPipeline(run.pipeline.name);
+const executor = new PipelineExecutor(pipeline);
+await executor.execute({ triggeredBy: run.triggeredBy });
+```
+
+---
+
+## Development Roadmap
+
+### Phase 1: Core Worker Implementation
+
+**Deliverables:**
+1. **Worker Entry Point** (`src/worker.ts`)
+   - Main polling loop
+   - PipelineLoader integration
+   - Basic error handling
+   - Graceful shutdown handlers
+
+2. **Run Claimer** (`src/core/run-claimer.ts`)
+   - Atomic run acquisition function
+   - Uses Prisma transaction with FOR UPDATE SKIP LOCKED
+   - Returns run with pipeline relation
+
+3. **NPM Scripts**
+   - Add `"worker": "tsx src/worker.ts"` to package.json
+   - Add `"worker:build": "tsc && node dist/worker.js"`
+
+**Success Criteria:**
+- Worker polls database successfully
+- Can claim and execute pending runs
+- Graceful shutdown works correctly
+- No race conditions with multiple workers
+
+---
+
+### Phase 2: PM2 Integration
+
+**Deliverables:**
+1. **PM2 Ecosystem File** (`ecosystem.config.cjs`)
+   - Worker process definition
+   - Next.js server definition
+   - Shared environment variables
+   - Log rotation config
+
+2. **PM2 Installation & Setup**
+   - Add pm2 to devDependencies
+   - Create npm scripts for PM2 commands
+   - Document PM2 CLI usage
+
+3. **Environment Configuration**
+   - Ensure .env is loaded in worker
+   - Validate DATABASE_URL on startup
+   - Support POLL_INTERVAL env var
+
+**Success Criteria:**
+- `npm run pm2:start` launches both server and worker
+- Worker auto-restarts on crash
+- Logs rotate properly
+- Can scale to multiple worker instances
+
+---
+
+### Phase 3: Monitoring & Observability
+
+**Deliverables:**
+1. **Enhanced Logging**
+   - Structured logs with Winston
+   - Log worker startup/shutdown events
+   - Log each run execution start/finish
+   - Include runId and pipelineId in all logs
+
+2. **Metrics Collection**
+   - Track runs executed count
+   - Track execution duration
+   - Track error rate
+   - Log metrics every 60 seconds
+
+3. **Worker Monitoring Dashboard**
+   - Create dedicated dashboard page in Next.js UI
+   - Display worker health status (running/stopped/crashed)
+   - Show pending runs queue with count and details
+   - Display in-progress runs with real-time progress indicators
+   - Show recently completed runs timeline
+   - Display worker metrics cards (uptime, runs/hour, avg duration, error rate)
+   - Add auto-refresh every 5 seconds for real-time updates
+
+4. **Health Check Endpoint** (Optional)
+   - Express server on separate port
+   - GET /health returns worker status
+   - Used by orchestrators (K8s, Docker Swarm)
+
+**Success Criteria:**
+- Can trace run execution through logs
+- Metrics provide visibility into worker performance
+- Dashboard displays accurate real-time worker status
+- Pending and in-progress runs visible in UI
+- Health endpoint responds correctly
+
+---
+
+## Implementation Details
+
+### File Structure
+
+```
+src/
+├── worker.ts              # Main worker entry point
+├── core/
+│   ├── run-claimer.ts     # Atomic run acquisition
+│   ├── executor.ts        # Existing - reused
+│   ├── registry.ts        # Existing - reused
+│   └── index.ts           # Export run-claimer
+├── cli.ts                 # Existing
+└── pipelines/
+    └── *.ts               # Pipeline definitions
+
+ecosystem.config.cjs       # PM2 configuration
+package.json              # Add worker scripts
+```
+
+### Key Code Snippets
+
+**Worker Main Loop (`src/worker.ts`):**
+```typescript
+async function runWorker() {
+  // Load pipelines
+  const loader = new PipelineLoader();
+  await loader.loadAllPipelines();
+
+  console.log('Worker started, polling for pending runs...');
+
+  while (!isShuttingDown) {
+    try {
+      const run = await claimPendingRun();
+
+      if (!run) {
+        await sleep(POLL_INTERVAL);
+        continue;
+      }
+
+      console.log(`Executing run ${run.id} for pipeline ${run.pipeline.name}`);
+
+      const pipeline = registry.getPipeline(run.pipeline.name);
+      const executor = new PipelineExecutor(pipeline);
+      await executor.execute({ triggeredBy: run.triggeredBy });
+
+    } catch (error) {
+      console.error('Worker error:', error);
+      await sleep(POLL_INTERVAL);
+    }
+  }
+}
+```
+
+**Run Claimer (`src/core/run-claimer.ts`):**
+```typescript
+import prisma from './prisma.js';
+
+export async function claimPendingRun() {
+  return await prisma.$transaction(async (tx) => {
+    // Find first pending run
+    const run = await tx.run.findFirst({
+      where: { status: 'pending' },
+      orderBy: { createdAt: 'asc' },
+      include: { pipeline: true },
+    });
+
+    if (!run) return null;
+
+    // Atomically claim it by marking as running
+    await tx.run.update({
+      where: { id: run.id },
+      data: {
+        status: 'running',
+        startedAt: new Date(),
+      },
+    });
+
+    return run;
+  });
+}
+```
+
+**PM2 Config (`ecosystem.config.cjs`):**
+```javascript
+module.exports = {
+  apps: [
+    {
+      name: 'orbit-worker',
+      script: './dist/worker.js',
+      instances: 1,
+      exec_mode: 'fork',
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '500M',
+      env: {
+        NODE_ENV: 'production',
+        POLL_INTERVAL: '5000',
+      },
+      error_file: './logs/worker-error.log',
+      out_file: './logs/worker-out.log',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
+    },
+    {
+      name: 'orbit-server',
+      script: 'node_modules/next/dist/bin/next',
+      args: 'start',
+      instances: 1,
+      exec_mode: 'fork',
+      autorestart: true,
+      max_memory_restart: '1G',
+    },
+  ],
+};
+```
+
+### Environment Variables
+
+```bash
+# Worker Configuration
+POLL_INTERVAL=5000           # Milliseconds between polls
+MAX_EXECUTION_TIMEOUT=600000 # 10 minutes max per run
+WORKER_HEARTBEAT_INTERVAL=30000 # Log heartbeat every 30s
+
+# Database (shared with server)
+DATABASE_URL=postgresql://...
+```
+
+---
+
+## Deployment Guide
+
+### Local Development
+
+```bash
+# Terminal 1: Run worker in dev mode
+npm run worker
+
+# Terminal 2: Run Next.js server
+npm run dev:ui
+```
+
+### Production with PM2
+
+```bash
+# Install PM2 globally
+npm install -g pm2
+
+# Build project
+npm run build
+
+# Start all processes
+pm2 start ecosystem.config.cjs
+
+# View logs
+pm2 logs orbit-worker
+
+# Monitor processes
+pm2 monit
+
+# Restart worker
+pm2 restart orbit-worker
+
+# Stop all
+pm2 stop all
+```
+
+### Docker Deployment
+
+```dockerfile
+# Multi-stage Dockerfile
+FROM node:18 AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM node:18-slim
+WORKDIR /app
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./
+RUN npm install -g pm2
+CMD ["pm2-runtime", "ecosystem.config.cjs"]
+```
+
+---
+
+## Risks and Mitigations
+
+### Technical Risks
+
+**Risk 1: Database Connection Pool Exhaustion**
+- **Challenge:** Worker and server share same database
+- **Mitigation:**
+  - Configure Prisma connection limits
+  - Use separate connection pools for worker
+  - Monitor active connections
+
+**Risk 2: Long-Running Pipeline Blocks Worker**
+- **Challenge:** Single-threaded worker can't process other runs
+- **Mitigation:**
+  - Phase 1: Single worker is acceptable
+  - Phase 2: Scale to multiple PM2 instances
+  - Set MAX_EXECUTION_TIMEOUT to kill hung runs
+
+**Risk 3: Worker Crash During Execution**
+- **Challenge:** In-flight run marked as 'running' but not actually running
+- **Mitigation:**
+  - Use existing recovery system (`orbit recover --auto-resume`)
+  - Add worker health check that detects stale runs
+  - PM2 auto-restart minimizes downtime
+
+### Operational Risks
+
+**Risk 1: Logs Growing Unbounded**
+- **Challenge:** Worker logs fill disk
+- **Mitigation:**
+  - PM2 built-in log rotation
+  - Set max log size: 10MB
+  - Keep last 10 log files
+
+**Risk 2: Race Conditions with Multiple Workers**
+- **Challenge:** Two workers claim same run
+- **Mitigation:**
+  - SELECT FOR UPDATE SKIP LOCKED is atomic
+  - Test with 2+ worker instances
+  - Add run locking tests
+
+---
+
+## Success Metrics
+
+### Functional Metrics
+- Worker polls database successfully every 3 seconds
+- Pending runs execute within 10 seconds of creation
+- Zero race conditions in load testing (100 concurrent runs)
+- Graceful shutdown completes within 30 seconds
+
+### Performance Metrics
+- Worker CPU usage <5% when idle
+- Worker memory usage <100MB
+- Database query time <50ms for run claim
+- End-to-end run latency <1 second (excluding execution time)
+
+### Reliability Metrics
+- Worker uptime >99.9% (with PM2 auto-restart)
+- Zero data loss during worker restarts
+- Recovery from crashes within 5 seconds
+
+---
+
+## Appendix
+
+### A. PM2 Commands Reference
+
+```bash
+# Process Management
+pm2 start ecosystem.config.cjs    # Start all apps
+pm2 stop orbit-worker              # Stop worker
+pm2 restart orbit-worker           # Restart worker
+pm2 delete orbit-worker            # Remove from PM2
+
+# Monitoring
+pm2 list                           # Show all processes
+pm2 logs orbit-worker --lines 100  # View logs
+pm2 monit                          # Real-time monitoring
+pm2 describe orbit-worker          # Detailed process info
+
+# Scaling
+pm2 scale orbit-worker 3           # Run 3 worker instances
+pm2 reload orbit-worker            # Zero-downtime restart
+
+# Startup Script
+pm2 startup                        # Generate startup script
+pm2 save                           # Save current process list
+```
+
+### B. Database Schema for Run Locking
+
+The existing Prisma schema already supports atomic locking via transactions. No schema changes needed.
+
+**Claim Query (Prisma):**
+```typescript
+await prisma.$transaction(async (tx) => {
+  const run = await tx.run.findFirst({
+    where: { status: 'pending' },
+    orderBy: { createdAt: 'asc' },
+    include: { pipeline: true },
+  });
+
+  if (!run) return null;
+
+  await tx.run.update({
+    where: { id: run.id },
+    data: {
+      status: 'running',
+      startedAt: new Date(),
+    },
+  });
+
+  return run;
+});
+```
+
+### C. Testing Strategy
+
+**Unit Tests:**
+- `run-claimer.test.ts` - Test atomic run acquisition
+- `worker.test.ts` - Test polling loop logic
+- Mock database and registry
+
+**Integration Tests:**
+- Create pending run via API
+- Worker picks it up and executes
+- Verify run status updated to 'success'
+- Test with multiple workers (no race conditions)
+
+**Load Tests:**
+- Create 100 pending runs
+- Scale to 3 workers
+- All runs execute successfully
+- No duplicate executions
+
+### D. Architecture Decision: Why Separate Worker Process?
+
+**Considered Alternatives:**
+
+1. **Execute in API Handler (Immediate)**
+   - Pros: Simple, no new infrastructure
+   - Cons: Ties execution to HTTP request lifecycle, loses runs on restart
+
+2. **Next.js API Route with Background Jobs**
+   - Pros: Single process, simpler deployment
+   - Cons: Next.js not designed for long-running background work
+
+3. **Separate Worker Process (Chosen)**
+   - Pros: Clean separation, scalable, resilient, reuses CLI infrastructure
+   - Cons: Slightly more complex deployment
+
+**Decision Rationale:**
+- Separation of concerns: API server handles HTTP, worker handles execution
+- Horizontal scaling: Can run N workers independently
+- Fault isolation: Worker crash doesn't affect API
+- Reuses existing CLI infrastructure (PipelineLoader, registry)
+- Production-ready pattern used by Sidekiq, Celery, Bull
+
+### E. Worker vs CLI Execution Comparison
+
+| Aspect | CLI (`orbit run`) | Worker Process |
+|--------|-------------------|----------------|
+| Trigger | Manual command | Automatic (poll DB) |
+| Use Case | Ad-hoc testing | Production automation |
+| Run Creation | Creates run + executes | Executes existing run |
+| Pipeline Loading | Loads on each run | Loads once at startup |
+| Process Management | User-managed | PM2-managed |
+| Scalability | Single execution | Multiple workers |
+| Recovery | Manual resume | Auto-recovery |
+
+Both use the same core execution engine (`PipelineExecutor`), ensuring consistent behavior.
+
+---
+
+**Document Version:** 1.0
+**Last Updated:** 2025-10-12
+**Status:** Ready for Implementation

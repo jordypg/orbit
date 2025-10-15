@@ -1,0 +1,52 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "preserve",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "allowSyntheticDefaultImports": true,
+    "incremental": true,
+    "allowJs": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/server/*": ["./src/server/*"],
+      "@/ui/*": ["./src/ui/*"],
+      "@/core/*": ["./src/core/*"],
+      "@/components/*": ["./components/*"],
+      "@/lib/*": ["./lib/*"],
+      "@/*": ["./*"]
+    },
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ]
+  },
+  "include": [
+    "app/**/*",
+    "components/**/*",
+    "lib/**/*",
+    "src/server/**/*",
+    ".next/types/**/*.ts",
+    "next.config.js",
+    "tailwind.config.js",
+    "postcss.config.js"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src/core",
+    "src/cli.ts",
+    "src/pipelines",
+    "**/*.spec.ts",
+    "**/*.test.ts"
+  ]
+}
