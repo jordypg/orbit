@@ -3,6 +3,7 @@ import { createTRPCRouter, publicProcedure } from '../trpc.js';
 import { TRPCError } from '@trpc/server';
 import { registry } from '../../core/registry.js';
 import { ensurePipelinesLoaded } from '../utils/pipeline-loader.js';
+import { processUpload } from '../utils/file-upload.js';
 
 export const pipelineRouter = createTRPCRouter({
   /**
@@ -182,6 +183,44 @@ export const pipelineRouter = createTRPCRouter({
       });
 
       return { success: true };
+    }),
+
+  /**
+   * Upload a file for pipeline processing
+   * Accepts base64-encoded file data and saves to temp storage
+   */
+  uploadFile: publicProcedure
+    .input(
+      z.object({
+        fileData: z.string(), // base64 encoded file
+        mimeType: z.string(),
+        originalName: z.string().optional(),
+      })
+    )
+    .mutation(async ({ input }) => {
+      try {
+        // Decode base64 to buffer
+        const buffer = Buffer.from(input.fileData, 'base64');
+
+        // Process and save the upload
+        const result = await processUpload(
+          buffer,
+          input.mimeType,
+          input.originalName
+        );
+
+        return {
+          success: true,
+          tempPath: result.tempPath,
+          filename: result.filename,
+          originalName: result.originalName,
+        };
+      } catch (error) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: error instanceof Error ? error.message : 'File upload failed',
+        });
+      }
     }),
 
   /**

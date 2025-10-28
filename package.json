@@ -15,6 +15,7 @@
     "start:ui": "next start",
     "start": "node dist/cli.js",
     "cli": "tsx src/cli.ts",
+    "orbit": "node dist/cli.js",
     "worker": "node dist/worker.js",
     "worker:dev": "tsx watch src/worker.ts",
     "worker:build": "tsc && node dist/worker.js",

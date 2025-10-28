@@ -31,36 +31,22 @@ export default function PipelineDetailPage() {
     }
   );
 
-  // Set default file path based on pipeline type
-  const getDefaultFilePath = () => {
-    if (pipeline?.name === 'document-processing') return 'good_referral.PDF';
-    if (pipeline?.name === 'image-upload-test') return 'mapo.png';
-    return '';
-  };
-
-  // Get placeholder text based on pipeline type
-  const getFileInputPlaceholder = () => {
-    if (pipeline?.name === 'document-processing') return 'Enter document path (e.g., good_referral.PDF)';
-    if (pipeline?.name === 'image-upload-test') return 'Enter image path (e.g., mapo.png)';
-    return 'Enter file path';
-  };
-
-  const [filePath, setFilePath] = React.useState('');
+  const [selectedFile, setSelectedFile] = React.useState<File | null>(null);
+  const [uploadedFilePath, setUploadedFilePath] = React.useState<string>('');
   const [showFileInput, setShowFileInput] = React.useState(false);
-
-  // Update filePath when pipeline loads
-  React.useEffect(() => {
-    if (pipeline && !filePath) {
-      setFilePath(getDefaultFilePath());
-    }
-  }, [pipeline]);
+  const [isUploading, setIsUploading] = React.useState(false);
 
   const utils = trpc.useUtils();
+
+  const uploadFileMutation = trpc.pipeline.uploadFile.useMutation();
+
   const triggerMutation = trpc.pipeline.trigger.useMutation({
     onSuccess: () => {
       utils.pipeline.get.invalidate({ id: pipelineId });
       utils.run.getByPipeline.invalidate({ pipelineId, limit: 50 });
       setShowFileInput(false);
+      setSelectedFile(null);
+      setUploadedFilePath('');
     },
   });
 
@@ -75,10 +61,51 @@ export default function PipelineDetailPage() {
     }
   };
 
+  const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setSelectedFile(file);
+    setIsUploading(true);
+
+    try {
+      // Convert file to base64
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        const base64Data = e.target?.result as string;
+        // Remove the data URL prefix (e.g., "data:image/png;base64,")
+        const base64Content = base64Data.split(',')[1];
+
+        try {
+          const result = await uploadFileMutation.mutateAsync({
+            fileData: base64Content,
+            mimeType: file.type,
+            originalName: file.name,
+          });
+
+          setUploadedFilePath(result.tempPath);
+        } catch (error) {
+          console.error('Upload failed:', error);
+          alert('File upload failed. Please try again.');
+          setSelectedFile(null);
+        } finally {
+          setIsUploading(false);
+        }
+      };
+      reader.readAsDataURL(file);
+    } catch (error) {
+      console.error('File reading failed:', error);
+      setIsUploading(false);
+      setSelectedFile(null);
+    }
+  };
+
   const handleSubmitWithFile = () => {
+    if (!uploadedFilePath) return;
+
     triggerMutation.mutate({
       id: pipelineId,
-      metadata: { filePath },
+      metadata: { filePath: uploadedFilePath },
     });
   };
 
@@ -188,34 +215,45 @@ export default function PipelineDetailPage() {
                 {pipeline.description || 'No description provided'}
               </p>
             </div>
-            <div className="flex gap-2">
+            <div className="flex gap-2 items-center">
               {showFileInput && (
-                <input
-                  type="text"
-                  value={filePath}
-                  onChange={(e) => setFilePath(e.target.value)}
-                  placeholder={getFileInputPlaceholder()}
-                  className="px-3 py-2 border rounded-md min-w-[300px]"
-                />
+                <div className="flex items-center gap-2">
+                  <input
+                    type="file"
+                    accept="image/*,application/pdf"
+                    onChange={handleFileSelect}
+                    disabled={isUploading || triggerMutation.isPending}
+                    className="px-3 py-2 border rounded-md min-w-[300px]"
+                  />
+                  {selectedFile && (
+                    <span className="text-sm text-muted-foreground">
+                      {isUploading ? 'Uploading...' : '✓ Ready'}
+                    </span>
+                  )}
+                </div>
               )}
               {showFileInput ? (
                 <>
                   <Button
                     className="gap-2"
                     onClick={handleSubmitWithFile}
-                    disabled={triggerMutation.isPending || !filePath}
+                    disabled={triggerMutation.isPending || !uploadedFilePath || isUploading}
                   >
                     {triggerMutation.isPending ? (
                       <Loader2 className="h-4 w-4 animate-spin" />
                     ) : (
                       <Play className="h-4 w-4" />
                     )}
-                    {triggerMutation.isPending ? 'Starting...' : 'Upload'}
+                    {triggerMutation.isPending ? 'Starting...' : 'Run Pipeline'}
                   </Button>
                   <Button
                     variant="outline"
-                    onClick={() => setShowFileInput(false)}
-                    disabled={triggerMutation.isPending}
+                    onClick={() => {
+                      setShowFileInput(false);
+                      setSelectedFile(null);
+                      setUploadedFilePath('');
+                    }}
+                    disabled={triggerMutation.isPending || isUploading}
                   >
                     Cancel
                   </Button>

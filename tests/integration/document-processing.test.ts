@@ -13,6 +13,8 @@ import {
 } from './test-env-setup.js';
 import { createS3TestHelper } from './s3-test-helper.js';
 import { createVeryfiTestHelper } from './veryfi-test-helper.js';
+import { processUpload } from '../../src/server/utils/file-upload.js';
+import { readFile } from 'fs/promises';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -162,6 +164,79 @@ describe('Document Processing Pipeline Integration Tests', () => {
         expect(runRecord?.status).toBe('success');
       }
     }, 240000); // 4 minute timeout for complete pipeline execution
+
+    it('should process an uploaded file through the complete pipeline', async () => {
+      // Simulate the user upload flow: file → upload API → temp storage → pipeline
+
+      // Read the test image file
+      const testFilePath = path.join(__dirname, '..', '..', 'mapo.png');
+      const fileBuffer = await readFile(testFilePath);
+
+      // Simulate the upload endpoint - process and save to temp storage
+      const uploadResult = await processUpload(fileBuffer, 'image/png', 'mapo.png');
+
+      expect(uploadResult.tempPath).toBeDefined();
+      expect(uploadResult.originalName).toBe('mapo.png');
+
+      // Create pipeline executor
+      const executor = new PipelineExecutor(documentProcessingPipeline);
+
+      // Run the complete pipeline with the uploaded file's temp path
+      const result = await executor.execute({
+        metadata: {
+          filePath: uploadResult.tempPath, // Use temp path from upload
+          testRun: true,
+          integrationTest: true,
+          uploadedFile: true,
+        },
+      });
+
+      // Track run ID for cleanup
+      if (result.runId) {
+        createdRunIds.push(result.runId);
+      }
+
+      // Verify pipeline completed successfully
+      expect(result.success).toBe(true);
+      expect(result.error).toBeUndefined();
+
+      // Verify all steps completed
+      const stepResults = result.stepResults || {};
+      expect(Object.keys(stepResults).length).toBeGreaterThan(0);
+
+      // Get the pipeline summary
+      const summaryData = stepResults['pipeline-summary']?.data as any;
+      expect(summaryData).toBeDefined();
+
+      // Verify S3 upload worked with temp file
+      expect(summaryData.s3).toBeDefined();
+      expect(summaryData.s3.bucket).toBeTruthy();
+      expect(summaryData.s3.key).toBeTruthy();
+      expect(summaryData.s3.url).toBeTruthy();
+
+      // Verify Veryfi processing
+      expect(summaryData.veryfi).toBeDefined();
+      expect(summaryData.veryfi.response).toBeDefined();
+
+      const veryfiResponse = summaryData.veryfi.response;
+      if (veryfiResponse.id) {
+        veryfiHelper.trackDocument(veryfiResponse.id);
+      }
+
+      // Verify database storage
+      expect(summaryData.storage).toBeDefined();
+      expect(summaryData.storage.documentId).toBeTruthy();
+      expect(summaryData.storage.status).toBe('completed');
+
+      // Verify database record
+      const dbRecord = await prisma.veryfiDocument.findUnique({
+        where: { id: summaryData.storage.documentId },
+      });
+
+      expect(dbRecord).toBeDefined();
+      expect(dbRecord?.status).toBe('completed');
+      expect(dbRecord?.runId).toBe(result.runId);
+    }, 240000); // 4 minute timeout
   });
 
   describe('Pipeline Error Handling', () => {

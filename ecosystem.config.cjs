@@ -23,6 +23,10 @@ module.exports = {
         NODE_ENV: "development",
         POLL_INTERVAL: "5000",
       },
+      env_production: {
+        NODE_ENV: "production",
+        POLL_INTERVAL: "5000",
+      },
       error_file: "./logs/worker-error.log",
       out_file: "./logs/worker-out.log",
       log_date_format: "YYYY-MM-DD HH:mm:ss Z",
@@ -52,6 +56,10 @@ module.exports = {
       },
       env_development: {
         NODE_ENV: "development",
+        PORT: "3000",
+      },
+      env_production: {
+        NODE_ENV: "production",
         PORT: "3000",
       },
       error_file: "./logs/server-error.log",
