@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import { createTRPCRouter, publicProcedure } from '../trpc.js';
 import { TRPCError } from '@trpc/server';
+import { observable } from '@trpc/server/observable';
+import { runEvents, type RunStatusEvent } from '../../core/events.js';
+import { registry } from '../../core/registry.js';
+import { ensurePipelinesLoaded } from '../utils/pipeline-loader.js';
 
 export const runRouter = createTRPCRouter({
   /**
@@ -28,11 +32,8 @@ export const runRouter = createTRPCRouter({
         cursor: cursor ? { id: cursor } : undefined,
         include: {
           steps: {
-            select: {
-              id: true,
-              name: true,
-              status: true,
-              attemptCount: true,
+            orderBy: {
+              startedAt: 'asc',
             },
           },
           _count: {
@@ -49,9 +50,31 @@ export const runRouter = createTRPCRouter({
         nextCursor = nextItem?.id;
       }
 
+      // Get pipeline definition from registry if available
+      let stepDefinitions: Array<{ name: string; order: number }> = [];
+      if (runs.length > 0) {
+        try {
+          await ensurePipelinesLoaded();
+          const pipeline = await ctx.prisma.pipeline.findUnique({
+            where: { id: pipelineId },
+          });
+          if (pipeline) {
+            const pipelineDef = registry.getPipeline(pipeline.name);
+            stepDefinitions = pipelineDef.steps.map((step, index) => ({
+              name: step.name,
+              order: index,
+            }));
+          }
+        } catch (error) {
+          // Pipeline not in registry, that's okay
+          console.warn('Pipeline definition not found in registry');
+        }
+      }
+
       return {
         runs,
         nextCursor,
+        stepDefinitions,
       };
     }),
 
@@ -86,7 +109,24 @@ export const runRouter = createTRPCRouter({
         });
       }
 
-      return run;
+      // Get pipeline definition from registry if available
+      let stepDefinitions: Array<{ name: string; order: number }> = [];
+      try {
+        await ensurePipelinesLoaded();
+        const pipelineDef = registry.getPipeline(run.pipeline.name);
+        stepDefinitions = pipelineDef.steps.map((step, index) => ({
+          name: step.name,
+          order: index,
+        }));
+      } catch (error) {
+        // Pipeline not in registry, that's okay
+        console.warn('Pipeline definition not found in registry');
+      }
+
+      return {
+        ...run,
+        stepDefinitions,
+      };
     }),
 
   /**
@@ -180,5 +220,41 @@ export const runRouter = createTRPCRouter({
       });
 
       return runs;
+    }),
+
+  /**
+   * Subscribe to run status updates for a specific pipeline
+   * Streams real-time updates via Server-Sent Events
+   */
+  onStatusUpdate: publicProcedure
+    .input(
+      z.object({
+        pipelineId: z.string().cuid(),
+      })
+    )
+    .subscription(({ input }) => {
+      console.log('[Subscription] Client subscribed to pipeline:', input.pipelineId);
+
+      return observable<RunStatusEvent>((emit) => {
+        const onStatusChange = (event: RunStatusEvent) => {
+          console.log('[Subscription] Received event for pipeline:', event.pipelineId, 'requested:', input.pipelineId);
+
+          // Only emit events for the requested pipeline
+          if (event.pipelineId === input.pipelineId) {
+            console.log('[Subscription] Emitting event to client:', event);
+            emit.next(event);
+          }
+        };
+
+        // Subscribe to the event emitter
+        runEvents.on('runStatusChange', onStatusChange);
+        console.log('[Subscription] Event listener attached');
+
+        // Cleanup function - called when client disconnects
+        return () => {
+          console.log('[Subscription] Client unsubscribed from pipeline:', input.pipelineId);
+          runEvents.off('runStatusChange', onStatusChange);
+        };
+      });
     }),
 });

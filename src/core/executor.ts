@@ -25,12 +25,12 @@ const DELAY_MULTIPLIER = parseFloat(process.env.RETRY_DELAY_MULTIPLIER || "1");
 
 /**
  * Calculates exponential backoff delay in seconds
- * Formula: min(30 * 2^attempt, 300)
+ * Formula: min(5 * 2^attempt, 300)
  * @param attempt - Current attempt number (1-based)
  * @returns Delay in seconds
  */
 export function calculateBackoff(attempt: number): number {
-  const baseDelay = 30; // 30 seconds
+  const baseDelay = 5; // 5 seconds
   const maxDelay = 300; // 5 minutes
 
   const delay = baseDelay * Math.pow(2, attempt - 1);
@@ -223,13 +223,182 @@ export class PipelineExecutor {
   }
 
   /**
-   * Executes all steps in the pipeline sequentially
+   * Builds a dependency graph for steps.
+   * Steps without explicit dependencies depend on all previous steps (sequential).
+   * @returns Map of step name to set of dependency step names
+   */
+  private buildDependencyGraph(steps: StepDefinition[]): Map<string, Set<string>> {
+    const graph = new Map<string, Set<string>>();
+    const stepNames = steps.map(s => s.name);
+
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      if (!step) continue;
+
+      const dependencies = new Set<string>();
+
+      if (step.config?.dependsOn) {
+        // Explicit dependencies
+        for (const dep of step.config.dependsOn) {
+          if (!stepNames.includes(dep)) {
+            throw new Error(
+              `Step "${step.name}" depends on non-existent step "${dep}"`
+            );
+          }
+          // Check for forward dependencies
+          const depIndex = steps.findIndex(s => s.name === dep);
+          if (depIndex >= i) {
+            throw new Error(
+              `Step "${step.name}" cannot depend on step "${dep}" which appears later in the pipeline`
+            );
+          }
+          dependencies.add(dep);
+        }
+      } else {
+        // No explicit dependencies: depends on all previous steps (sequential)
+        for (let j = 0; j < i; j++) {
+          const prevStep = steps[j];
+          if (prevStep) {
+            dependencies.add(prevStep.name);
+          }
+        }
+      }
+
+      graph.set(step.name, dependencies);
+    }
+
+    return graph;
+  }
+
+
+  /**
+   * Executes all steps in the pipeline using dependency-based parallelism.
+   * Steps with satisfied dependencies execute in parallel.
    * @throws Error if any step fails
    */
   private async executeSteps(context: ExecutionContext): Promise<void> {
-    for (const stepDef of this.pipeline.steps) {
-      await this.executeStep(stepDef, context);
+    // Build dependency graph
+    const graph = this.buildDependencyGraph(this.pipeline.steps);
+
+    // Track step completion and in-flight promises
+    const completed = new Set<string>();
+    const failed = new Set<string>();  // Track failed steps to prevent re-launching
+    const inFlightPromises = new Map<string, Promise<{ stepName: string; success: boolean; error?: Error }>>();
+    let firstError: Error | null = null;
+
+    // Helper to create a step execution promise
+    const createStepPromise = (stepDef: StepDefinition): Promise<{ stepName: string; success: boolean; error?: Error }> => {
+      return (async () => {
+        try {
+          await this.executeStep(stepDef, context);
+          return { stepName: stepDef.name, success: true };
+        } catch (error) {
+          return {
+            stepName: stepDef.name,
+            success: false,
+            error: error instanceof Error ? error : new Error(String(error)),
+          };
+        }
+      })();
+    };
+
+    // Main execution loop - continuously launch steps as dependencies are satisfied
+    while (completed.size + failed.size < this.pipeline.steps.length) {
+      // Get steps ready to execute (excluding failed steps)
+      const inFlight = new Set(inFlightPromises.keys());
+      const processedOrInflight = new Set([...completed, ...failed, ...inFlight]);
+      const readySteps = this.pipeline.steps.filter(stepDef => {
+        // Skip if already processed or in flight
+        if (processedOrInflight.has(stepDef.name)) {
+          return false;
+        }
+
+        // Check if all dependencies are completed
+        const dependencies = graph.get(stepDef.name) || new Set();
+        return Array.from(dependencies).every(dep => completed.has(dep));
+      });
+
+      // If we have an error, don't launch new steps - just wait for in-flight to complete
+      if (!firstError) {
+        // Launch all ready steps immediately
+        for (const step of readySteps) {
+          inFlightPromises.set(step.name, createStepPromise(step));
+        }
+      }
+
+      // If no steps are in flight and not all completed, we have an error or circular dependency
+      if (inFlightPromises.size === 0) {
+        if (firstError) {
+          throw firstError;
+        }
+        // No steps in flight but not all completed - circular dependency or bug
+        throw new Error("Pipeline execution stalled - possible circular dependency");
+      }
+
+      // Wait for any step to complete and process it immediately
+      // Create an array of promises that resolve with both the step name and result
+      const promisesWithNames = Array.from(inFlightPromises.entries()).map(([name, promise]) =>
+        promise.then(result => ({ name, result }))
+      );
+
+      // Race all in-flight promises and get the first one that completes
+      const { name, result } = await Promise.race(promisesWithNames);
+
+      // Immediately process the completed step
+      inFlightPromises.delete(name);
+
+      if (result.success) {
+        completed.add(name);
+      } else {
+        // Mark as failed and record first error
+        failed.add(name);
+        if (!firstError && result.error) {
+          firstError = result.error;
+        }
+      }
+
+      // Loop continues immediately to check for new ready steps
     }
+
+    // Check for errors after all steps complete
+    if (firstError) {
+      throw firstError;
+    }
+  }
+
+  /**
+   * Executes steps for an existing run (used by worker)
+   * This allows the worker to reuse the retry logic without creating a new run
+   * @internal
+   */
+  async _executeStepsForExistingRun(context: ExecutionContext): Promise<void> {
+    await this.executeSteps(context);
+  }
+
+  /**
+   * Executes a promise with an optional timeout
+   * @param promise - Promise to execute
+   * @param timeoutMs - Timeout in milliseconds (optional)
+   * @returns The result of the promise
+   * @throws Error if timeout occurs
+   */
+  private async executeWithTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs?: number
+  ): Promise<T> {
+    if (!timeoutMs) {
+      return promise;
+    }
+
+    return Promise.race([
+      promise,
+      new Promise<T>((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`Step execution timeout after ${timeoutMs}ms`)),
+          timeoutMs
+        )
+      ),
+    ]);
   }
 
   /**
@@ -269,8 +438,11 @@ export class PipelineExecutor {
           metadata: context.metadata,
         };
 
-        // Execute step handler
-        const result = await stepDef.handler(stepContext);
+        // Execute step handler with optional timeout
+        const result = await this.executeWithTimeout(
+          Promise.resolve(stepDef.handler(stepContext)),
+          stepDef.config?.timeout
+        );
 
         // Store step result
         context.stepResults[stepDef.name] = result;

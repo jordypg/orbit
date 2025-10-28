@@ -1,4 +1,5 @@
 import prisma from "./prisma.js";
+import { runEvents } from "./events.js";
 
 // ==================== Pipeline Operations ====================
 
@@ -98,13 +99,24 @@ export async function updateRunStatus(
   status: string,
   finishedAt?: Date
 ) {
-  return prisma.run.update({
+  const run = await prisma.run.update({
     where: { id },
     data: {
       status,
       finishedAt,
     },
   });
+
+  // Emit event for real-time updates
+  runEvents.emitRunStatusChange({
+    type: "run_status_changed",
+    runId: run.id,
+    pipelineId: run.pipelineId,
+    status: run.status,
+    timestamp: new Date(),
+  });
+
+  return run;
 }
 
 export async function getActiveRuns() {
@@ -149,10 +161,26 @@ export async function updateStepStatus(
     nextRetryAt?: Date;
   }
 ) {
-  return prisma.step.update({
+  const step = await prisma.step.update({
     where: { id },
     data,
+    include: {
+      run: true,
+    },
   });
+
+  // Emit event for real-time updates
+  runEvents.emitRunStatusChange({
+    type: "step_status_changed",
+    runId: step.runId,
+    pipelineId: step.run.pipelineId,
+    status: step.status,
+    timestamp: new Date(),
+    stepId: step.id,
+    stepName: step.name,
+  });
+
+  return step;
 }
 
 export async function updateStepResult(
@@ -262,11 +290,22 @@ export async function updateRunAndStepStatus(
  * Mark run as complete and update final status
  */
 export async function completeRun(runId: string, status: "success" | "failed") {
-  return prisma.run.update({
+  const run = await prisma.run.update({
     where: { id: runId },
     data: {
       status,
       finishedAt: new Date(),
     },
   });
+
+  // Emit event for real-time updates
+  runEvents.emitRunStatusChange({
+    type: "run_status_changed",
+    runId: run.id,
+    pipelineId: run.pipelineId,
+    status: run.status,
+    timestamp: new Date(),
+  });
+
+  return run;
 }

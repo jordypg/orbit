@@ -1,10 +1,12 @@
 import { z } from 'zod';
 import { createTRPCRouter, publicProcedure } from '../trpc.js';
 import { TRPCError } from '@trpc/server';
+import { registry } from '../../core/registry.js';
+import { ensurePipelinesLoaded } from '../utils/pipeline-loader.js';
 
 export const pipelineRouter = createTRPCRouter({
   /**
-   * List all pipelines
+   * List all pipelines with run statistics
    */
   list: publicProcedure.query(async ({ ctx }) => {
     const pipelines = await ctx.prisma.pipeline.findMany({
@@ -12,6 +14,16 @@ export const pipelineRouter = createTRPCRouter({
         createdAt: 'desc',
       },
       include: {
+        runs: {
+          orderBy: {
+            startedAt: 'desc',
+          },
+          take: 1, // Get most recent run for status
+          select: {
+            status: true,
+            startedAt: true,
+          },
+        },
         _count: {
           select: {
             runs: true,
@@ -20,7 +32,35 @@ export const pipelineRouter = createTRPCRouter({
       },
     });
 
-    return pipelines;
+    // Calculate statistics for each pipeline
+    const pipelinesWithStats = await Promise.all(
+      pipelines.map(async (pipeline) => {
+        // Get all runs for statistics calculation
+        const allRuns = await ctx.prisma.run.findMany({
+          where: { pipelineId: pipeline.id },
+          select: { status: true },
+        });
+
+        const totalRuns = allRuns.length;
+        const successfulRuns = allRuns.filter((r) => r.status === 'success').length;
+        const successRate = totalRuns > 0 ? (successfulRuns / totalRuns) * 100 : 0;
+
+        // Determine overall status based on most recent run
+        const lastRun = pipeline.runs[0];
+        const status = lastRun ? lastRun.status : 'idle';
+
+        return {
+          ...pipeline,
+          stats: {
+            successRate,
+            status,
+            lastRunAt: lastRun?.startedAt || null,
+          },
+        };
+      })
+    );
+
+    return pipelinesWithStats;
   }),
 
   /**
@@ -59,7 +99,24 @@ export const pipelineRouter = createTRPCRouter({
         });
       }
 
-      return pipeline;
+      // Try to get pipeline definition from registry
+      let stepDefinitions: Array<{ name: string; order: number }> = [];
+      try {
+        await ensurePipelinesLoaded();
+        const pipelineDef = registry.getPipeline(pipeline.name);
+        stepDefinitions = pipelineDef.steps.map((step, index) => ({
+          name: step.name,
+          order: index,
+        }));
+      } catch (error) {
+        // Pipeline not loaded in registry yet, that's okay
+        console.warn(`Pipeline ${pipeline.name} not found in registry`);
+      }
+
+      return {
+        ...pipeline,
+        stepDefinitions,
+      };
     }),
 
   /**
@@ -135,6 +192,7 @@ export const pipelineRouter = createTRPCRouter({
     .input(
       z.object({
         id: z.string().cuid(),
+        metadata: z.record(z.string(), z.any()).optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
@@ -156,6 +214,7 @@ export const pipelineRouter = createTRPCRouter({
           pipelineId: input.id,
           status: 'pending',
           triggeredBy: 'manual',
+          metadata: input.metadata as any,
         },
         include: {
           pipeline: true,

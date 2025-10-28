@@ -1,12 +1,15 @@
 'use client';
 
+import React from 'react';
 import { trpc } from '@/app/providers';
-import { Loader2, ArrowLeft, Play, CheckCircle2, XCircle, Clock, AlertCircle } from 'lucide-react';
+import { Loader2, ArrowLeft, Play, CheckCircle2, XCircle, Clock, AlertCircle, Copy, RefreshCw } from 'lucide-react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
+import { JsonDisplay } from '@/components/ui/json-display';
 import { formatDistanceToNow, intervalToDuration } from 'date-fns';
 
 export default function PipelineDetailPage() {
@@ -14,18 +17,71 @@ export default function PipelineDetailPage() {
   const pipelineId = params.id as string;
 
   const { data: pipeline, isLoading: isPipelineLoading, error: pipelineError } = trpc.pipeline.get.useQuery({ id: pipelineId });
-  const { data: runsData, isLoading: isRunsLoading, error: runsError } = trpc.run.getByPipeline.useQuery({
-    pipelineId,
-    limit: 50,
-  });
+  const { data: runsData, isLoading: isRunsLoading, error: runsError } = trpc.run.getByPipeline.useQuery(
+    {
+      pipelineId,
+      limit: 50,
+    },
+    {
+      // Poll every 2 seconds when there are active runs
+      refetchInterval: (data) => {
+        const hasActiveRuns = data?.runs?.some((run) => run.status === 'pending' || run.status === 'running');
+        return hasActiveRuns ? 2000 : false;
+      },
+    }
+  );
+
+  // Set default file path based on pipeline type
+  const getDefaultFilePath = () => {
+    if (pipeline?.name === 'document-processing') return 'good_referral.PDF';
+    if (pipeline?.name === 'image-upload-test') return 'mapo.png';
+    return '';
+  };
+
+  // Get placeholder text based on pipeline type
+  const getFileInputPlaceholder = () => {
+    if (pipeline?.name === 'document-processing') return 'Enter document path (e.g., good_referral.PDF)';
+    if (pipeline?.name === 'image-upload-test') return 'Enter image path (e.g., mapo.png)';
+    return 'Enter file path';
+  };
+
+  const [filePath, setFilePath] = React.useState('');
+  const [showFileInput, setShowFileInput] = React.useState(false);
+
+  // Update filePath when pipeline loads
+  React.useEffect(() => {
+    if (pipeline && !filePath) {
+      setFilePath(getDefaultFilePath());
+    }
+  }, [pipeline]);
 
   const utils = trpc.useUtils();
   const triggerMutation = trpc.pipeline.trigger.useMutation({
     onSuccess: () => {
       utils.pipeline.get.invalidate({ id: pipelineId });
       utils.run.getByPipeline.invalidate({ pipelineId, limit: 50 });
+      setShowFileInput(false);
     },
   });
+
+  const handleTrigger = () => {
+    // Check if this pipeline requires file input
+    const requiresFileInput = pipeline?.name === 'image-upload-test' || pipeline?.name === 'document-processing';
+
+    if (requiresFileInput) {
+      setShowFileInput(true);
+    } else {
+      triggerMutation.mutate({ id: pipelineId });
+    }
+  };
+
+  const handleSubmitWithFile = () => {
+    triggerMutation.mutate({
+      id: pipelineId,
+      metadata: { filePath },
+    });
+  };
+
 
   const getStatusIcon = (status: string) => {
     switch (status) {
@@ -80,6 +136,10 @@ export default function PipelineDetailPage() {
     return { total, success, failed, running, successRate };
   };
 
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+  };
+
   if (isPipelineLoading || isRunsLoading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
@@ -128,18 +188,53 @@ export default function PipelineDetailPage() {
                 {pipeline.description || 'No description provided'}
               </p>
             </div>
-            <Button
-              className="gap-2"
-              onClick={() => triggerMutation.mutate({ id: pipelineId })}
-              disabled={triggerMutation.isPending}
-            >
-              {triggerMutation.isPending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Play className="h-4 w-4" />
+            <div className="flex gap-2">
+              {showFileInput && (
+                <input
+                  type="text"
+                  value={filePath}
+                  onChange={(e) => setFilePath(e.target.value)}
+                  placeholder={getFileInputPlaceholder()}
+                  className="px-3 py-2 border rounded-md min-w-[300px]"
+                />
               )}
-              {triggerMutation.isPending ? 'Starting...' : 'Run Now'}
-            </Button>
+              {showFileInput ? (
+                <>
+                  <Button
+                    className="gap-2"
+                    onClick={handleSubmitWithFile}
+                    disabled={triggerMutation.isPending || !filePath}
+                  >
+                    {triggerMutation.isPending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Play className="h-4 w-4" />
+                    )}
+                    {triggerMutation.isPending ? 'Starting...' : 'Upload'}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => setShowFileInput(false)}
+                    disabled={triggerMutation.isPending}
+                  >
+                    Cancel
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  className="gap-2"
+                  onClick={handleTrigger}
+                  disabled={triggerMutation.isPending}
+                >
+                  {triggerMutation.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Play className="h-4 w-4" />
+                  )}
+                  {triggerMutation.isPending ? 'Starting...' : 'Run Now'}
+                </Button>
+              )}
+            </div>
           </div>
         </div>
       </header>
@@ -206,7 +301,7 @@ export default function PipelineDetailPage() {
                 </p>
                 <Button
                   className="gap-2"
-                  onClick={() => triggerMutation.mutate({ id: pipelineId })}
+                  onClick={handleTrigger}
                   disabled={triggerMutation.isPending}
                 >
                   {triggerMutation.isPending ? (
@@ -218,21 +313,55 @@ export default function PipelineDetailPage() {
                 </Button>
               </div>
             ) : (
-              <div className="space-y-4">
+              <Accordion type="single" collapsible className="space-y-4">
                 {runs.map((run) => {
                   const duration = calculateDuration(run.startedAt, run.finishedAt);
                   const failedSteps = run.steps.filter((s) => s.status === 'failed').length;
+                  const successSteps = run.steps.filter((s) => s.status === 'success').length;
+
+                  // Merge pipeline step definitions with actual execution steps
+                  const stepDefinitions = runsData?.stepDefinitions || (pipeline as any)?.stepDefinitions || [];
+                  const executedSteps = run.steps || [];
+                  const executedStepsByName = new Map(executedSteps.map(s => [s.name, s]));
+
+                  // Create unified step list (all steps from definition, matched with execution data)
+                  const allSteps = stepDefinitions.length > 0
+                    ? stepDefinitions.map(def => {
+                        const executed = executedStepsByName.get(def.name);
+                        return executed || {
+                          id: `pending-${def.name}`,
+                          name: def.name,
+                          status: 'pending',
+                          startedAt: null,
+                          finishedAt: null,
+                          attemptCount: 0,
+                          result: null,
+                          error: null,
+                        };
+                      })
+                    : executedSteps; // Fallback to executed steps if no definition
 
                   return (
-                    <Link key={run.id} href={`/pipeline/${pipelineId}/run/${run.id}`}>
-                      <div className="p-4 rounded-lg border hover:border-primary transition-colors cursor-pointer">
-                        <div className="flex items-start justify-between gap-4">
-                          <div className="flex-1 min-w-0">
+                    <AccordionItem key={run.id} value={run.id} className="border rounded-lg px-4">
+                      <AccordionTrigger className="hover:no-underline">
+                        <div className="flex items-start justify-between gap-4 w-full pr-4">
+                          <div className="flex-1 min-w-0 text-left">
                             <div className="flex items-center gap-3 mb-2">
                               {getStatusBadge(run.status)}
                               <code className="text-sm text-muted-foreground">
                                 {run.id.slice(0, 8)}
                               </code>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-6 w-6"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  copyToClipboard(run.id);
+                                }}
+                              >
+                                <Copy className="h-3 w-3" />
+                              </Button>
                             </div>
                             <div className="flex flex-wrap gap-4 text-sm text-muted-foreground">
                               <div>
@@ -243,7 +372,7 @@ export default function PipelineDetailPage() {
                                 <span className="font-medium">Duration:</span> {duration}
                               </div>
                               <div>
-                                <span className="font-medium">Steps:</span> {run.steps.length}
+                                <span className="font-medium">Steps:</span> {successSteps}/{stepDefinitions.length || run.steps.length}
                                 {failedSteps > 0 && (
                                   <span className="text-red-600 ml-1">
                                     ({failedSteps} failed)
@@ -258,11 +387,106 @@ export default function PipelineDetailPage() {
                             </div>
                           </div>
                         </div>
-                      </div>
-                    </Link>
+                      </AccordionTrigger>
+                      <AccordionContent>
+                        {/* Step Timeline */}
+                        <div className="space-y-4 pt-4">
+                          {allSteps.map((step, index) => (
+                            <div key={step.id} className="relative">
+                              {/* Timeline connector */}
+                              {index < allSteps.length - 1 && (
+                                <div className="absolute left-[18px] top-10 h-full w-0.5 bg-border" />
+                              )}
+
+                              {/* Step content */}
+                              <div className="flex gap-4">
+                                {/* Status icon */}
+                                <div className="flex-shrink-0 mt-1">
+                                  {getStatusIcon(step.status)}
+                                </div>
+
+                                {/* Step details */}
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-start justify-between gap-4 mb-2">
+                                    <div>
+                                      <h4 className="font-semibold text-sm">{step.name}</h4>
+                                      {step.startedAt && (
+                                        <p className="text-xs text-muted-foreground">
+                                          Duration: {calculateDuration(step.startedAt, step.finishedAt)}
+                                          {step.attemptCount > 1 && ` • Attempt ${step.attemptCount}`}
+                                        </p>
+                                      )}
+                                    </div>
+                                    {getStatusBadge(step.status)}
+                                  </div>
+
+                                  {/* Error display */}
+                                  {step.error && (
+                                    <div className="mt-2 p-3 rounded-lg border border-destructive bg-destructive/10">
+                                      <div className="flex items-start justify-between gap-2 mb-2">
+                                        <div className="flex items-center gap-2">
+                                          <AlertCircle className="h-4 w-4 text-destructive flex-shrink-0" />
+                                          <p className="text-xs font-semibold text-destructive">Error</p>
+                                        </div>
+                                        <Button
+                                          variant="ghost"
+                                          size="icon"
+                                          className="h-6 w-6"
+                                          onClick={() => copyToClipboard(step.error || '')}
+                                        >
+                                          <Copy className="h-3 w-3" />
+                                        </Button>
+                                      </div>
+                                      <div className={step.error.length > 500 ? "max-h-40 overflow-y-auto" : ""}>
+                                        <JsonDisplay
+                                          content={step.error}
+                                          className="text-destructive/80"
+                                        />
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  {/* Result display */}
+                                  {step.result && step.status === 'success' && (
+                                    <div className="mt-2 p-3 rounded-lg border bg-muted/50">
+                                      <div className="flex items-start justify-between gap-2 mb-2">
+                                        <p className="text-xs font-semibold">Result</p>
+                                        <Button
+                                          variant="ghost"
+                                          size="icon"
+                                          className="h-6 w-6"
+                                          onClick={() => copyToClipboard(step.result || '')}
+                                        >
+                                          <Copy className="h-3 w-3" />
+                                        </Button>
+                                      </div>
+                                      <div className={step.result.length > 500 ? "max-h-40 overflow-y-auto" : ""}>
+                                        <JsonDisplay
+                                          content={step.result}
+                                          className="text-muted-foreground"
+                                        />
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* View full details link */}
+                        <div className="mt-4 pt-4 border-t">
+                          <Link href={`/pipeline/${pipelineId}/run/${run.id}`}>
+                            <Button variant="outline" size="sm" className="w-full">
+                              View Full Run Details
+                            </Button>
+                          </Link>
+                        </div>
+                      </AccordionContent>
+                    </AccordionItem>
                   );
                 })}
-              </div>
+              </Accordion>
             )}
           </CardContent>
         </Card>

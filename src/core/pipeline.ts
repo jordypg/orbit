@@ -92,6 +92,39 @@ function validateSteps(steps: StepDefinition[]): void {
 }
 
 /**
+ * Validates step dependencies
+ * @throws Error if dependencies are invalid
+ */
+function validateDependencies(steps: StepDefinition[]): void {
+  const stepNames = steps.map(s => s.name);
+
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    if (!step) continue;
+
+    // If step has explicit dependencies, validate them
+    if (step.config?.dependsOn) {
+      for (const dep of step.config.dependsOn) {
+        // Check if dependency exists
+        if (!stepNames.includes(dep)) {
+          throw new Error(
+            `Step "${step.name}" depends on non-existent step "${dep}"`
+          );
+        }
+
+        // Check for forward dependencies (step depends on a later step)
+        const depIndex = steps.findIndex(s => s.name === dep);
+        if (depIndex >= i) {
+          throw new Error(
+            `Step "${step.name}" cannot depend on step "${dep}" which appears later in the pipeline`
+          );
+        }
+      }
+    }
+  }
+}
+
+/**
  * Creates a step definition with proper typing and validation
  *
  * @param name - Unique name for the step
@@ -125,6 +158,7 @@ export function step<TResult = unknown>(
       ? {
           maxRetries: options.maxRetries,
           timeout: options.timeout,
+          dependsOn: options.dependsOn,
         }
       : undefined,
   };
@@ -165,6 +199,9 @@ export function definePipeline(
 
   // Validate steps
   validateSteps(options.steps);
+
+  // Validate dependencies
+  validateDependencies(options.steps);
 
   // Validate schedule if provided (basic cron validation)
   if (options.schedule) {

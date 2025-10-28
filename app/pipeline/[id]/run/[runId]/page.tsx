@@ -7,6 +7,7 @@ import { useParams } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { JsonDisplay } from '@/components/ui/json-display';
 import { formatDistanceToNow, formatDuration, intervalToDuration } from 'date-fns';
 
 export default function RunDetailPage() {
@@ -14,7 +15,16 @@ export default function RunDetailPage() {
   const runId = params.runId as string;
   const pipelineId = params.id as string;
 
-  const { data: run, isLoading, error } = trpc.run.get.useQuery({ id: runId });
+  const { data: run, isLoading, error } = trpc.run.get.useQuery(
+    { id: runId },
+    {
+      // Poll every 2 seconds while run is active
+      refetchInterval: (data) => {
+        const isActive = data?.status === 'pending' || data?.status === 'running';
+        return isActive ? 2000 : false;
+      },
+    }
+  );
   const utils = trpc.useUtils();
   const retryMutation = trpc.run.retry.useMutation({
     onSuccess: () => {
@@ -99,6 +109,11 @@ export default function RunDetailPage() {
 
   const duration = calculateDuration(run.startedAt, run.finishedAt);
 
+  // Get step definitions and calculate counts
+  const stepDefinitions = (run as any).stepDefinitions || [];
+  const totalSteps = stepDefinitions.length || run.steps.length;
+  const completedSteps = run.steps.filter(s => s.status === 'success').length;
+
   return (
     <main className="min-h-screen bg-background">
       {/* Header */}
@@ -182,7 +197,7 @@ export default function RunDetailPage() {
           <CardHeader>
             <CardTitle>Execution Timeline</CardTitle>
             <CardDescription>
-              {run.steps.length} step{run.steps.length !== 1 ? 's' : ''} in this run
+              {completedSteps}/{totalSteps} step{totalSteps !== 1 ? 's' : ''}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -233,9 +248,10 @@ export default function RunDetailPage() {
                               <Copy className="h-3 w-3" />
                             </Button>
                           </div>
-                          <pre className="text-xs text-destructive/80 whitespace-pre-wrap break-words">
-                            {step.error}
-                          </pre>
+                          <JsonDisplay
+                            content={step.error}
+                            className="text-destructive/80"
+                          />
                         </div>
                       )}
 
@@ -253,9 +269,10 @@ export default function RunDetailPage() {
                               <Copy className="h-3 w-3" />
                             </Button>
                           </div>
-                          <pre className="text-xs text-muted-foreground whitespace-pre-wrap break-words">
-                            {step.result}
-                          </pre>
+                          <JsonDisplay
+                            content={step.result}
+                            className="text-muted-foreground"
+                          />
                         </div>
                       )}
                     </div>

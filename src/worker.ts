@@ -172,13 +172,13 @@ function setupGracefulShutdown() {
 
 /**
  * Execute an existing run (that was claimed from the database)
- * This is different from PipelineExecutor.execute() which creates a new run.
+ * Uses PipelineExecutor's retry logic by leveraging its internal executor.
  */
 async function executeExistingRun(
   run: Awaited<ReturnType<typeof claimPendingRun>> & { pipeline: { name: string } },
   pipeline: PipelineDefinition
 ): Promise<void> {
-  const { PipelineExecutor: _, updateRunStatus, createStep, updateStepStatus, updateStepResult } = await import("./core/index.js");
+  const { PipelineExecutor, updateRunStatus } = await import("./core/index.js");
 
   // Create context-aware logger for this run
   const runLogger = createLogger({
@@ -187,94 +187,28 @@ async function executeExistingRun(
     pipelineName: run.pipeline.name,
   });
 
-  runLogger.info("Starting run execution");
+  runLogger.info("Starting run execution with retry logic");
+
+  // Create a PipelineExecutor instance
+  const executor = new PipelineExecutor(pipeline);
 
   try {
-    // Build initial step context
-    const stepResults: Record<string, any> = {};
+    // Mark run as running
+    await updateRunStatus(run.id, "running");
 
-    // Execute each step sequentially
-    for (const stepDef of pipeline.steps) {
-      runLogger.info(`Executing step: ${stepDef.name}`, { stepName: stepDef.name });
-
-      // Create step record
-      const step = await createStep({
-        runId: run.id,
-        name: stepDef.name,
-      });
-
-      await updateStepStatus(step.id, {
-        status: "running",
-        startedAt: new Date(),
-        attemptCount: 1,
-      });
-
-      // Build step context
-      const stepContext = {
-        runId: run.id,
-        pipelineId: run.pipelineId,
-        prevResults: stepResults,
-        metadata: {
-          triggeredBy: run.triggeredBy || "worker",
-        },
-      };
-
-      try {
-        // Execute step handler
-        const result = await stepDef.handler(stepContext);
-
-        // Store result for next steps
-        stepResults[stepDef.name] = result;
-
-        if (result.success) {
-          // Mark step as successful
-          runLogger.info(`Step completed successfully: ${stepDef.name}`, {
-            stepName: stepDef.name,
-            hasData: result.data !== undefined
-          });
-
-          await updateStepStatus(step.id, {
-            status: "success",
-            finishedAt: new Date(),
-            attemptCount: 1,
-          });
-
-          if (result.data !== undefined) {
-            await updateStepResult(step.id, JSON.stringify(result.data));
-          }
-        } else {
-          // Step returned failure
-          runLogger.error(`Step failed: ${stepDef.name}`, undefined, {
-            stepName: stepDef.name,
-            error: result.error,
-          });
-
-          await updateStepStatus(step.id, {
-            status: "failed",
-            finishedAt: new Date(),
-            attemptCount: 1,
-          });
-
-          await updateStepResult(step.id, "", result.error || "Step failed");
-          throw new Error(result.error || `Step "${stepDef.name}" failed`);
-        }
-      } catch (error: any) {
-        // Exception during execution
-        runLogger.error(`Step threw exception: ${stepDef.name}`, error, {
-          stepName: stepDef.name,
-        });
-
-        await updateStepStatus(step.id, {
-          status: "failed",
-          finishedAt: new Date(),
-          attemptCount: 1,
-        });
-
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        await updateStepResult(step.id, "", errorMessage);
-        throw error;
-      }
-    }
+    // Execute using PipelineExecutor's retry logic
+    // We use the internal _executeStepsForExistingRun method which handles retries
+    // @ts-ignore - accessing internal method for retry logic reuse
+    await executor._executeStepsForExistingRun({
+      runId: run.id,
+      pipelineId: run.pipelineId,
+      stepResults: {},
+      metadata: {
+        triggeredBy: run.triggeredBy || "worker",
+        // Merge any metadata from the run record (e.g., filePath from UI)
+        ...(run.metadata && typeof run.metadata === 'object' ? run.metadata : {}),
+      },
+    });
 
     // All steps completed successfully
     await updateRunStatus(run.id, "success", new Date());

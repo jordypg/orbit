@@ -189,6 +189,177 @@ The tRPC API provides the following routes:
 - `worker.health()` - Get worker health status
 - `worker.metrics()` - Get real-time performance metrics
 
+## Services
+
+The pipeline includes specialized services for document processing:
+
+### S3 Upload Service
+
+Upload files to AWS S3 with automatic retry and error handling.
+
+**Location**: `src/services/s3-upload.ts`
+
+**Configuration** (Environment Variables):
+```env
+AWS_S3_BUCKET=your-bucket-name
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=your-access-key
+AWS_SECRET_ACCESS_KEY=your-secret-key
+```
+
+**Usage in Pipeline**:
+```typescript
+import { step } from './core/index.js';
+import { s3Upload } from './services/s3-upload.js';
+
+step('upload-to-s3', s3Upload, {
+  maxRetries: 3,
+  timeout: 60000, // 60 seconds
+});
+```
+
+**Returns**:
+```typescript
+{
+  success: true,
+  data: {
+    bucket: string,    // S3 bucket name
+    key: string,       // S3 object key (path)
+    url: string,       // Full S3 URL
+    contentType: string, // MIME type
+    size: number       // File size in bytes
+  }
+}
+```
+
+### Veryfi Processing Service
+
+Process documents through Veryfi API for data extraction.
+
+**Location**: `src/services/veryfi-processor.ts`
+
+**Configuration** (Environment Variables):
+```env
+VERYFI_CLIENT_ID=your-client-id
+VERYFI_CLIENT_SECRET=your-client-secret (optional)
+VERYFI_USERNAME=your-username
+VERYFI_API_KEY=your-api-key
+VERYFI_API_BASE_URL=https://api.veryfi.com/api/v8/partner (optional)
+VERYFI_TIMEOUT=120000 (optional, defaults to 120 seconds)
+```
+
+**Usage in Pipeline**:
+```typescript
+import { step } from './core/index.js';
+import { veryfiProcess } from './services/veryfi-processor.js';
+
+step('process-document', async (ctx) => {
+  // Expects S3 upload data from previous step
+  const veryfiContext = {
+    ...ctx,
+    prevResults: {
+      s3Upload: ctx.prevResults['s3-upload'].data
+    }
+  };
+  return await veryfiProcess(veryfiContext);
+}, {
+  maxRetries: 2,
+  timeout: 180000, // 3 minutes
+});
+```
+
+**Returns**:
+```typescript
+{
+  success: true,
+  data: {
+    veryfiId: number,           // Veryfi document ID
+    response: VeryfiResponse,   // Complete Veryfi API response
+    s3Bucket: string,          // Source S3 bucket
+    s3Key: string,             // Source S3 key
+    s3Url: string              // Source S3 URL
+  }
+}
+```
+
+### Veryfi Storage Service
+
+Store Veryfi processing results in the database.
+
+**Location**: `src/services/veryfi-storage.ts`
+
+**Database Table**: `VeryfiDocument`
+
+**Usage in Pipeline**:
+```typescript
+import { step } from './core/index.js';
+import { veryfiStorage } from './services/veryfi-storage.js';
+
+step('store-results', async (ctx) => {
+  const storageContext = {
+    ...ctx,
+    prevResults: {
+      veryfiProcess: ctx.prevResults['veryfi-process'].data
+    }
+  };
+  return await veryfiStorage(storageContext);
+}, {
+  maxRetries: 2,
+  timeout: 30000, // 30 seconds
+});
+```
+
+**Returns**:
+```typescript
+{
+  success: true,
+  data: {
+    documentId: string,  // Database record ID (cuid)
+    veryfiId: string,    // Veryfi document ID
+    status: string       // Processing status
+  }
+}
+```
+
+### Document Processing Pipeline
+
+Complete end-to-end pipeline combining all three services.
+
+**Location**: `src/pipelines/document-processing.ts`
+
+**Pipeline Name**: `document-processing`
+
+**Workflow**:
+1. **S3 Upload**: Upload document to S3 bucket
+2. **Veryfi Processing**: Send document to Veryfi API for extraction
+3. **Database Storage**: Store results in VeryfiDocument table
+4. **Pipeline Summary**: Generate execution summary
+
+**Running the Pipeline**:
+```typescript
+import { PipelineExecutor } from './core/executor.js';
+import documentProcessingPipeline from './pipelines/document-processing.js';
+
+const executor = new PipelineExecutor(documentProcessingPipeline);
+
+const result = await executor.execute({
+  metadata: {
+    filePath: '/path/to/document.pdf',
+    userId: 'user-123'
+  }
+});
+
+console.log('Success:', result.success);
+console.log('Run ID:', result.runId);
+console.log('Duration:', result.duration, 'ms');
+```
+
+**Test Script**:
+```bash
+# Run the complete document processing pipeline
+node scripts/test-document-processing.mjs
+```
+
 ## Tech Stack
 
 - **Runtime**: Node.js with TypeScript
