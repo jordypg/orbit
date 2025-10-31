@@ -9,7 +9,7 @@ import { type AppRouter } from '../../src/server/routers/_app';
  */
 const getBaseUrl = () => {
   if (typeof window !== 'undefined') return ''; // browser should use relative url
-  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`; // SSR should use vercel url
+  if (process.env.API_URL) return process.env.API_URL; // SSR should use configured API URL
   return `http://localhost:${process.env.PORT ?? 3000}`; // dev SSR should use localhost
 };
 
