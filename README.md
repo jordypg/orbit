@@ -1,6 +1,6 @@
 # Orbit Pipeline
 
-A production-ready pipeline execution framework with automatic retry, state persistence, background workers, and real-time monitoring.
+Experimenting with a pipeline execution framework built for a monolith infrastructure. Lives in your TypeScript backend, lets you use TypeScript’s type-safe handlers instead of YAML configs, and is a library to import rather than a platform to deploy. Automatic retry, state persistence, background workers, and real-time monitoring. Currently contains a CLI, a UI that puts runs into a Postgres database, and a worker process that executes those runs.
 
 ## Features
 
